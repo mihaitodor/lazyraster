@@ -17,6 +17,7 @@ import (
 	"github.com/Nitro/ringman"
 	log "github.com/Sirupsen/logrus"
 	"github.com/gorilla/handlers"
+	"github.com/newrelic/go-agent"
 )
 
 var (
@@ -94,6 +95,9 @@ func handleImage(w http.ResponseWriter, r *http.Request, cache *filecache.FileCa
 		log.Debugf("Total request time: %s", time.Now().Sub(startTime))
 	}(time.Now())
 
+	txn, _ := w.(newrelic.Transaction)
+	defer newrelic.StartSegment(txn, "handleImage").End()
+
 	defer r.Body.Close()
 
 	// Let's first parse out some URL args and return errors if
@@ -128,11 +132,18 @@ func handleImage(w http.ResponseWriter, r *http.Request, cache *filecache.FileCa
 		log.Debugf("Raster time %s for %s page %d", time.Now().Sub(startTime), r.URL.Path, page)
 	}(time.Now())
 
+	defer newrelic.StartSegment(txn, "rasterize").End()
+
 	// Get ahold of a rasterizer for this document, either from the cache,
 	// or newly constructed by the cache.
 	raster, err := rasterCache.GetRasterizer(storagePath)
 	if err != nil {
 		log.Errorf("Unable to get rasterizer for %s: '%s'", storagePath, err)
+		if txn != nil {
+			txn.NoticeError(
+				errors.New("Unable to get rasterizer for " + storagePath + ": " + err.Error()),
+			)
+		}
 		http.Error(w, fmt.Sprintf("Error encountered while processing pdf %s: '%s'", storagePath, err), 500)
 		return
 	}
@@ -144,6 +155,12 @@ func handleImage(w http.ResponseWriter, r *http.Request, cache *filecache.FileCa
 			http.Error(w, fmt.Sprintf("Page is not part of this pdf: %s", err), 404)
 		} else {
 			log.Errorf("Error while processing pdf: %s", err)
+
+			if txn != nil {
+				txn.NoticeError(
+					errors.New("Unable to GeneratePage for " + storagePath + ": " + err.Error()),
+				)
+			}
 			http.Error(w, fmt.Sprintf("Error encountered while processing pdf: %s", err), 500)
 		}
 		return
@@ -160,13 +177,13 @@ func handleImage(w http.ResponseWriter, r *http.Request, cache *filecache.FileCa
 	}
 }
 
-func serveHttp(config *Config, cache *filecache.FileCache, ring *ringman.MemberlistRing, rasterCache *RasterCache) error {
+func serveHttp(config *Config, cache *filecache.FileCache, ring *ringman.MemberlistRing, rasterCache *RasterCache, nrApp *newrelic.Application) error {
 
 	http.HandleFunc("/favicon.ico", http.NotFound)
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
 	http.Handle("/hashring/", http.StripPrefix("/hashring", ring.HttpMux()))
 	http.HandleFunc("/rastercache/free", makeCacheHandler(handleClearRasterCache, cache, rasterCache))
-	http.HandleFunc("/", makeCacheHandler(handleImage, cache, rasterCache))
+	http.HandleFunc(newrelic.WrapHandleFunc(*nrApp, "/", makeCacheHandler(handleImage, cache, rasterCache)))
 	err := http.ListenAndServe(
 		fmt.Sprintf(":%s", config.Port), handlers.LoggingHandler(os.Stdout, http.DefaultServeMux),
 	)
