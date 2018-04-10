@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/Nitro/urlsign"
 	"github.com/gorilla/handlers"
 	log "github.com/sirupsen/logrus"
+	"github.com/ultimate-guitar/go-imagequant"
 	"github.com/yvasiyarov/gorelic"
 )
 
@@ -348,7 +350,11 @@ func (h *RasterHttpServer) handleImage(w http.ResponseWriter, r *http.Request) {
 	if rParams.ImageType == "image/jpeg" {
 		err = jpeg.Encode(w, image, &jpeg.Options{Quality: rParams.ImageQuality})
 	} else {
-		err = png.Encode(w, image)
+		buf := &bytes.Buffer{}
+		err = png.Encode(buf, image)
+		var optiImage []byte
+		optiImage, err = imagequant.Crush(buf.Bytes(), 7, -3)
+		w.Write(optiImage)
 	}
 
 	if err != nil && !strings.Contains(err.Error(), "write: broken pipe") {
